@@ -118,7 +118,7 @@ footer{background:#080808;border-top:1px solid #1a1a1a;overflow:hidden}
     <div class="hero-content">
         <div class="counter-label">
             <span class="live-dot"></span>
-            BULLS ON CHAIN
+            <span id="counter-label-text">BULLS CHARGING (24H)</span>
         </div>
         <div class="hero-number-spacer"></div>
         <div class="delta-display" id="delta-text"></div>
@@ -734,19 +734,59 @@ window.addEventListener('resize', function() {
 });
 
 /* ============================================================
-   HOLDER COUNTER — SOLSCAN API
+   HOLDER ACTIVITY COUNTER — DEXSCREENER (Solscan blocks CORS)
+   Uses pairs[0].info.holders if available, else pairs[0].txns.h24.buys
+   as a live "BULLS CHARGING IN 24H" proxy. Capped at 3 retries with
+   a manual refresh button on failure (no infinite spin).
    ============================================================ */
 var TOKEN_ADDR = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump';
-var SOLSCAN_URL = 'https://public-api.solscan.io/token/holders?tokenAddress=' + TOKEN_ADDR + '&limit=1&offset=0';
+var DEX_URL = 'https://api.dexscreener.com/latest/dex/tokens/' + TOKEN_ADDR;
 
 var holderCount = null;
 var initialHolderCount = null;
 var holderHistory = [];
 var sparklineChart = null;
+var holderRetries = 0;
+var HOLDER_RETRY_CAP = 3;
+var holderFetchInFlight = false;
+var holderSource = 'unknown'; // 'holders' | 'txns24h' | 'unavailable'
 
 var deltaText = document.getElementById('delta-text');
 var loadingDisplay = document.getElementById('loading-display');
 var sparklineContainer = document.getElementById('sparkline-container');
+
+function setScanningText(t) {
+    var el = loadingDisplay.querySelector('.scanning-text');
+    if (el) el.textContent = t;
+}
+
+function showHolderFailedUI() {
+    // Stop the spinning bar, render a clean "N/A" figure + manual refresh button.
+    loadingDisplay.classList.add('hidden');
+
+    // Render "N/A" via the changeNumber-morph path so the 3D sphere shows clean text.
+    var display = 'N/A';
+    try {
+        setNumberTargets(display);
+        morphState = 'converge';
+    } catch (e) {
+        console.warn('[Holders] N/A render fallback failed:', e.message);
+    }
+
+    // Update delta line + add a refresh button under the sparkline area.
+    deltaText.textContent = 'holder data unavailable \u2014 tap to retry';
+    deltaText.className = 'delta-display delta-negative';
+    deltaText.style.opacity = '1';
+    deltaText.style.cursor = 'pointer';
+    deltaText.onclick = function() {
+        holderRetries = 0;
+        holderCount = null;
+        initialHolderCount = null;
+        loadingDisplay.classList.remove('hidden');
+        setScanningText('SCANNING CHAIN...');
+        fetchHolders();
+    };
+}
 
 function updateSparkline() {
     if (holderHistory.length < 2) return;
@@ -794,15 +834,44 @@ function updateDelta(current) {
         deltaText.className = 'delta-display';
     }
     deltaText.style.opacity = '1';
+    deltaText.onclick = null;
+    deltaText.style.cursor = 'default';
 }
 
 async function fetchHolders() {
+    if (holderFetchInFlight) return;
+    holderFetchInFlight = true;
     try {
-        var response = await fetch(SOLSCAN_URL);
+        var response = await fetch(DEX_URL);
         if (!response.ok) throw new Error('HTTP ' + response.status);
         var data = await response.json();
-        var count = data.total;
-        console.log('[Holders] Fetch success:', count);
+        if (!data || !data.pairs || data.pairs.length === 0) throw new Error('No pairs in response');
+
+        // Prefer pairs[0].info.holders when DexScreener exposes it.
+        var pair = data.pairs[0];
+        var holdersVal = (pair.info && typeof pair.info.holders === 'number')
+            ? pair.info.holders : null;
+
+        // Fallback: pairs[0].txns.h24.buys as a live activity proxy
+        var buysVal = (pair.txns && pair.txns.h24 && typeof pair.txns.h24.buys === 'number')
+            ? pair.txns.h24.buys : null;
+
+        var count;
+        var newSource;
+        if (holdersVal !== null && holdersVal > 0) {
+            count = holdersVal;
+            newSource = 'holders';
+        } else if (buysVal !== null && buysVal > 0) {
+            count = buysVal;
+            newSource = 'txns24h';
+        } else {
+            throw new Error('No holder or txn data in pairs[0]');
+        }
+
+        // Success \u2014 reset retry state, mark resolved.
+        holderRetries = 0;
+        holderSource = newSource;
+        console.log('[Holders] Fetch success (' + newSource + '):', count);
 
         loadingDisplay.classList.add('hidden');
 
@@ -828,11 +897,22 @@ async function fetchHolders() {
         updateSparkline();
 
     } catch (err) {
-        console.error('[Holders] Fetch failed:', err.message);
-        if (holderCount === null) {
-            loadingDisplay.querySelector('.scanning-text').textContent = 'RETRYING...';
+        holderRetries += 1;
+        console.error('[Holders] Fetch failed (attempt ' + holderRetries + '/' + HOLDER_RETRY_CAP + '):', err.message);
+
+        if (holderRetries >= HOLDER_RETRY_CAP) {
+            // Hard cap hit \u2014 give up the loop and surface N/A + manual retry.
+            console.error('[Holders] Retry cap reached \u2014 entering failed-N/A state.');
+            showHolderFailedUI();
+        } else {
+            if (holderCount === null) {
+                setScanningText('RETRYING... ' + holderRetries + '/' + HOLDER_RETRY_CAP);
+            }
+            // Schedule next attempt; do not loop when in failed state.
+            setTimeout(fetchHolders, 8000);
         }
-        setTimeout(fetchHolders, 15000);
+    } finally {
+        holderFetchInFlight = false;
     }
 }
 
@@ -946,8 +1026,9 @@ if (document.fonts && document.fonts.ready) {
     }, 1000);
 }
 
-// Poll holders every 8s
+// Poll holders every 8s — but only while we haven't entered the failed-N/A state.
 setInterval(function() {
+    if (document.getElementById('delta-text').onclick !== null) return; // failed state: stop polling
     if (holderCount !== null) fetchHolders();
 }, 8000);
 
