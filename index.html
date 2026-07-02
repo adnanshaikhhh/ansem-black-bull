@@ -734,16 +734,15 @@ window.addEventListener('resize', function() {
 });
 
 /* ============================================================
-   HOLDER COUNTER — SOLSCAN PRO API v2.0
-   Endpoint: pro-api.solscan.io/v2.0/token/holders
-   Requires header: { accept: application/json, token: SOLSCAN_API_KEY }
-   Fallback: DexScreener pairs[0].txns.h24.buys if Solscan key missing
+   HOLDER COUNTER — HELIUS DAS getTokenAccounts (true holder count)
+   + DexScreener for fast 2s price/activity polling
    ============================================================ */
 var TOKEN_ADDR = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump';
-var SOLSCAN_API_KEY = window.SOLSCAN_API_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3ODI5NjM2Njc1NTMsImVtYWlsIjoiYWRuYW50b25oQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc4Mjk2MzY2N30.cFjAN3ZHqXE2rJQ3epAmD_IQl_tjn7qfXrNTPmXMYt8';
-var HOLDER_API = 'https://pro-api.solscan.io/v2.0/token/holders?address=' + TOKEN_ADDR + '&page=1&page_size=10';
+var HELIUS_API_KEY = '283c0ecb-5e1e-4315-a165-dfff61ccdaee';
+var HELIUS_RPC = 'https://mainnet.helius-rpc.com/?api-key=' + HELIUS_API_KEY;
 var DEX_FALLBACK_URL = 'https://api.dexscreener.com/latest/dex/tokens/' + TOKEN_ADDR;
-var HOLDER_POLL_MS = 2000;
+var HOLDER_POLL_MS = 2000;    // fast poll for display update
+var HOLDER_FULL_COUNT_MS = 60000; // full holder count refresh every 60s
 var HOLDER_RETRY_CAP = 3;
 
 var holderCount = null;
@@ -754,6 +753,7 @@ var holderRetries = 0;
 var isFetchingHolders = false;
 var holderSource = 'unknown';
 var holderPollInterval = null;
+var holderFullCountInterval = null;
 
 var deltaText = document.getElementById('delta-text');
 var loadingDisplay = document.getElementById('loading-display');
@@ -766,12 +766,7 @@ function setScanningText(t) {
 
 function showHolderFailedUI() {
     loadingDisplay.classList.add('hidden');
-    try {
-        setNumberTargets('N/A');
-        morphState = 'converge';
-    } catch (e) {
-        console.warn('[Holders] N/A render fallback failed:', e.message);
-    }
+    try { setNumberTargets('N/A'); morphState = 'converge'; } catch (e) {}
     deltaText.textContent = 'holder data unavailable \u2014 tap to retry';
     deltaText.className = 'delta-display delta-negative';
     deltaText.style.opacity = '1';
@@ -789,52 +784,101 @@ function updateSparkline() {
     sparklineContainer.style.opacity = '1';
     var ctx = document.getElementById('sparkline').getContext('2d');
     if (sparklineChart) sparklineChart.destroy();
-
     sparklineChart = new Chart(ctx, {
         type: 'line',
-        data: {
-            labels: holderHistory.map(function(_, i) { return i.toString(); }),
-            datasets: [{
-                data: holderHistory,
-                borderColor: '#FFB800',
-                backgroundColor: 'rgba(255,184,0,0.08)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.35,
-                pointRadius: 0,
-                pointHoverRadius: 4,
-                pointHoverColor: '#CC0000'
-            }]
+        data: { labels: holderHistory.map(function(_, i) { return i.toString(); }),
+            datasets: [{ data: holderHistory, borderColor: '#FFB800',
+                backgroundColor: 'rgba(255,184,0,0.08)', borderWidth: 2, fill: true,
+                tension: 0.35, pointRadius: 0, pointHoverRadius: 4, pointHoverColor: '#CC0000' }]
         },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
+        options: { responsive: true, maintainAspectRatio: false,
             plugins: { legend: { display: false }, tooltip: { enabled: false } },
             scales: { x: { display: false }, y: { display: false } },
-            animation: { duration: 400 }
-        }
+            animation: { duration: 400 } }
     });
 }
 
 function updateDelta(current) {
     if (initialHolderCount === null) return;
     var delta = current - initialHolderCount;
-    if (delta > 0) {
-        deltaText.textContent = '+' + delta + ' since you arrived';
-        deltaText.className = 'delta-display delta-positive';
-    } else if (delta < 0) {
-        deltaText.textContent = delta + ' since you arrived';
-        deltaText.className = 'delta-display delta-negative';
-    } else {
-        deltaText.textContent = 'Holding steady';
-        deltaText.className = 'delta-display';
-    }
-    deltaText.style.opacity = '1';
-    deltaText.onclick = null;
-    deltaText.style.cursor = 'default';
+    if (delta > 0) { deltaText.textContent = '+' + delta + ' since you arrived'; deltaText.className = 'delta-display delta-positive'; }
+    else if (delta < 0) { deltaText.textContent = delta + ' since you arrived'; deltaText.className = 'delta-display delta-negative'; }
+    else { deltaText.textContent = 'Holding steady'; deltaText.className = 'delta-display'; }
+    deltaText.style.opacity = '1'; deltaText.onclick = null; deltaText.style.cursor = 'default';
 }
 
-/* === FETCH — tries Solscan Pro first, falls back to DexScreener === */
+/* === Full holder count via Helius getTokenAccounts pagination === */
+async function fetchFullHolderCount() {
+    try {
+        // Binary search for last page — start with page 1 limit 1000
+        var resp = await fetch(HELIUS_RPC, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+            body: JSON.stringify({ jsonrpc: '2.0', id: 'helius-count', method: 'getTokenAccounts',
+                params: { mint: TOKEN_ADDR, page: 1, limit: 1000 } })
+        });
+        if (!resp.ok) return null;
+        var data = await resp.json();
+        if (!data || !data.result) return null;
+        var firstPageTotal = data.result.total;
+        if (firstPageTotal === 0) return 0;
+
+        // If first page has < 1000, that's the total
+        if (firstPageTotal < 1000) return firstPageTotal;
+
+        // Binary search for last page (between 1 and 200)
+        var lo = 1, hi = 200, lastFullPage = 1;
+        while (lo <= hi) {
+            var mid = Math.floor((lo + hi) / 2);
+            var r = await fetch(HELIUS_RPC, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+                body: JSON.stringify({ jsonrpc: '2.0', id: 'bs-' + mid, method: 'getTokenAccounts',
+                    params: { mint: TOKEN_ADDR, page: mid, limit: 1000 } })
+            });
+            if (!r.ok) break;
+            var d = await r.json();
+            if (!d || !d.result) break;
+            var t = d.result.total;
+            if (t > 0) { lastFullPage = mid; lo = mid + 1; }
+            else { hi = mid - 1; }
+        }
+
+        // Get the last page's actual count
+        var lastResp = await fetch(HELIUS_RPC, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+            body: JSON.stringify({ jsonrpc: '2.0', id: 'last', method: 'getTokenAccounts',
+                params: { mint: TOKEN_ADDR, page: lastFullPage, limit: 1000 } })
+        });
+        if (!lastResp.ok) return lastFullPage * 1000;
+        var lastData = await lastResp.json();
+        var lastCount = lastData.result ? lastData.result.total : 1000;
+        // Check if lastFullPage was actually full (1000) — if so, count = lastFullPage * 1000 + lastCount only if next page is empty
+        // Simpler: (lastFullPage - 1) * 1000 + lastCount
+        if (lastCount === 1000) {
+            // This page is full — total = lastFullPage * 1000 (but there might be more)
+            // Check next page
+            var nextResp = await fetch(HELIUS_RPC, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+                body: JSON.stringify({ jsonrpc: '2.0', id: 'next', method: 'getTokenAccounts',
+                    params: { mint: TOKEN_ADDR, page: lastFullPage + 1, limit: 1000 } })
+            });
+            if (nextResp.ok) {
+                var nextData = await nextResp.json();
+                if (nextData.result && nextData.result.total > 0) {
+                    // lastFullPage wasn't actually last — add remainder
+                    return lastFullPage * 1000 + nextData.result.total;
+                }
+            }
+            return lastFullPage * 1000;
+        } else {
+            return (lastFullPage - 1) * 1000 + lastCount;
+        }
+    } catch (e) {
+        console.warn('[Holders] Full count failed:', e.message);
+        return null;
+    }
+}
+
+/* === Fast poll: DexScreener for live number, Helius for true count === */
 async function fetchHolders() {
     if (isFetchingHolders) return;
     isFetchingHolders = true;
@@ -842,34 +886,36 @@ async function fetchHolders() {
     var count = null;
     var newSource = 'unknown';
 
-    // --- Attempt 1: Solscan Pro API ---
-    if (SOLSCAN_API_KEY && SOLSCAN_API_KEY !== 'REPLACE_ME') {
-        try {
-            var resp = await fetch(HOLDER_API, {
-                method: 'GET',
-                headers: {
-                    'accept': 'application/json',
-                    'token': SOLSCAN_API_KEY
-                },
-                cache: 'no-store'
-            });
-            if (resp.ok) {
-                var data = await resp.json();
-                if (data && typeof data.total !== 'undefined') {
-                    count = Number(data.total);
-                    if (Number.isFinite(count) && count > 0) {
-                        newSource = 'solscan-pro';
-                    } else {
-                        count = null;
+    // --- Attempt 1: Helius getTokenAccounts (true holder count) ---
+    try {
+        var resp = await fetch(HELIUS_RPC, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+            body: JSON.stringify({ jsonrpc: '2.0', id: 'helius', method: 'getTokenAccounts',
+                params: { mint: TOKEN_ADDR, page: 1, limit: 1000 } })
+        });
+        if (resp.ok) {
+            var data = await resp.json();
+            if (data && data.result) {
+                var pageTotal = data.result.total;
+                if (pageTotal > 0 && pageTotal < 1000) {
+                    // Single page — exact count
+                    count = Number(pageTotal);
+                    if (Number.isFinite(count) && count > 0) newSource = 'helius-exact';
+                    else count = null;
+                } else if (pageTotal === 1000) {
+                    // Multi-page — estimate from cached full count
+                    if (holderCount !== null && holderSource.startsWith('helius')) {
+                        // Use cached count, just verify it's still multi-page
+                        count = holderCount; // keep last good value
+                        newSource = holderSource;
                     }
+                    // Full count will be refreshed by fetchFullHolderCount on separate interval
                 }
             }
-        } catch (e) {
-            console.warn('[Holders] Solscan Pro failed:', e.message);
         }
-    }
+    } catch (e) { console.warn('[Holders] Helius failed:', e.message); }
 
-    // --- Attempt 2: DexScreener fallback (no key needed) ---
+    // --- Attempt 2: DexScreener fallback ---
     if (count === null) {
         try {
             var resp2 = await fetch(DEX_FALLBACK_URL, { cache: 'no-store' });
@@ -877,30 +923,23 @@ async function fetchHolders() {
                 var data2 = await resp2.json();
                 if (data2 && data2.pairs && data2.pairs.length > 0) {
                     var pair = data2.pairs[0];
-                    // Try info.holders first
                     if (pair.info && typeof pair.info.holders === 'number' && pair.info.holders > 0) {
                         count = Number(pair.info.holders);
-                        if (Number.isFinite(count) && count > 0) {
-                            newSource = 'dex-holders';
-                        } else { count = null; }
+                        if (Number.isFinite(count) && count > 0) newSource = 'dex-holders';
+                        else count = null;
                     }
-                    // Fallback: txns.h24.buys as activity proxy
                     if (count === null && pair.txns && pair.txns.h24 && typeof pair.txns.h24.buys === 'number') {
                         count = Number(pair.txns.h24.buys);
-                        if (Number.isFinite(count) && count > 0) {
-                            newSource = 'dex-txns24h';
-                        } else { count = null; }
+                        if (Number.isFinite(count) && count > 0) newSource = 'dex-txns24h';
+                        else count = null;
                     }
                 }
             }
-        } catch (e2) {
-            console.warn('[Holders] DexScreener fallback failed:', e2.message);
-        }
+        } catch (e2) { console.warn('[Holders] DexScreener fallback failed:', e2.message); }
     }
 
     // --- Process result ---
     if (count !== null && Number.isFinite(count) && count > 0) {
-        // SUCCESS: reset retry state, update display
         holderRetries = 0;
         holderSource = newSource;
         console.log('[Holders] Fetch success (' + newSource + '):', count);
@@ -922,33 +961,53 @@ async function fetchHolders() {
         holderHistory.push(count);
         if (holderHistory.length > 20) holderHistory.shift();
         updateSparkline();
-
     } else {
-        // FAILURE: keep last good value on screen, increment retries
         holderRetries += 1;
         console.error('[Holders] Fetch failed (attempt ' + holderRetries + '/' + HOLDER_RETRY_CAP + ')');
-
         if (holderRetries >= HOLDER_RETRY_CAP) {
-            console.error('[Holders] Retry cap reached \u2014 entering failed-N/A state.');
-            // Stop polling
+            console.error('[Holders] Retry cap reached.');
             if (holderPollInterval) { clearInterval(holderPollInterval); holderPollInterval = null; }
+            if (holderFullCountInterval) { clearInterval(holderFullCountInterval); holderFullCountInterval = null; }
             showHolderFailedUI();
         } else {
-            if (holderCount === null) {
-                setScanningText('RETRYING... ' + holderRetries + '/' + HOLDER_RETRY_CAP);
-            }
-            // Keep last good value \u2014 do NOT reset display
+            if (holderCount === null) setScanningText('RETRYING... ' + holderRetries + '/' + HOLDER_RETRY_CAP);
         }
     }
 
     isFetchingHolders = false;
 }
 
+/* === Full count refresh — runs on slower interval, updates holderCount with true value === */
+async function refreshFullHolderCount() {
+    console.log('[Holders] Running full count refresh...');
+    var fullCount = await fetchFullHolderCount();
+    if (fullCount !== null && Number.isFinite(fullCount) && fullCount > 0) {
+        console.log('[Holders] Full count:', fullCount);
+        var prev = holderCount;
+        holderCount = fullCount;
+        holderSource = 'helius-full';
+        if (initialHolderCount === null) initialHolderCount = fullCount;
+        if (prev !== null && prev !== fullCount) {
+            changeNumber(fullCount, fullCount > prev);
+        }
+        updateDelta(fullCount);
+        holderHistory.push(fullCount);
+        if (holderHistory.length > 20) holderHistory.shift();
+        updateSparkline();
+    }
+}
+
 /* === POLLING CONTROL === */
 function startHolderPolling() {
     if (holderPollInterval) { clearInterval(holderPollInterval); holderPollInterval = null; }
+    if (holderFullCountInterval) { clearInterval(holderFullCountInterval); holderFullCountInterval = null; }
     fetchHolders();
+    // Fast poll — verifies holder count is still valid
     holderPollInterval = setInterval(fetchHolders, HOLDER_POLL_MS);
+    // Slow poll — does full pagination count for accurate number
+    holderFullCountInterval = setInterval(refreshFullHolderCount, HOLDER_FULL_COUNT_MS);
+    // Initial full count after 5s
+    setTimeout(refreshFullHolderCount, 5000);
 }
 
 /* ============================================================
