@@ -450,7 +450,7 @@ function setNumberTargets(number) {
     for (var i = 0; i < pts.length; i++) {
         if (Math.abs(pts[i].x) > maxX) maxX = Math.abs(pts[i].x);
     }
-    var maxW = window.innerWidth < 500 ? 12 : (window.innerWidth < 800 ? 16 : 20);
+    var maxW = window.innerWidth < 500 ? 8 : (window.innerWidth < 800 ? 12 : 16);
     var scl = maxX > maxW ? maxW / maxX : 1;
 
     for (var i = 0; i < PARTICLE_COUNT; i++) {
