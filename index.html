@@ -740,7 +740,7 @@ window.addEventListener('resize', function() {
    Fallback: DexScreener pairs[0].txns.h24.buys if Solscan key missing
    ============================================================ */
 var TOKEN_ADDR = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump';
-var SOLSCAN_API_KEY = window.SOLSCAN_API_KEY || 'REPLACE_ME';
+var SOLSCAN_API_KEY = window.SOLSCAN_API_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3ODI5NjM2Njc1NTMsImVtYWlsIjoiYWRuYW50b25oQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc4Mjk2MzY2N30.cFjAN3ZHqXE2rJQ3epAmD_IQl_tjn7qfXrNTPmXMYt8';
 var HOLDER_API = 'https://pro-api.solscan.io/v2.0/token/holders?address=' + TOKEN_ADDR + '&page=1&page_size=10';
 var DEX_FALLBACK_URL = 'https://api.dexscreener.com/latest/dex/tokens/' + TOKEN_ADDR;
 var HOLDER_POLL_MS = 2000;
