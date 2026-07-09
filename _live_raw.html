@@ -219,6 +219,7 @@ var dustSystem, dustGeometry;
 var ringMesh;
 var PARTICLE_COUNT = 5120;
 var positions, targets, velocities, colors, sizes;
+var morphState = 'scatter';
 var threeReady = false;
 var time = 0;
 var shakeIntensity = 0;
@@ -941,6 +942,7 @@ function updateDelta(current) {
     deltaText.style.opacity = '1'; deltaText.onclick = null; deltaText.style.cursor = 'default';
 }
 
+/* === Full holder count via Helius getTokenAccounts pagination === */
 /* === Fetch holder count INSTANTLY via DexScreener /tokens/v1/solana API (Issue 1) ===
    Returns integer holder count. Falls back to 24h buys if holders undefined. */
 async function fetchHolderCount() {
