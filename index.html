@@ -233,7 +233,6 @@ var DIGIT_SPACING = 9.0;
 var MORPH_DUR = 0.8;
 var activeDigitCount = 0;
 var slotX = new Array(MAX_DIGITS).fill(0);
-var charHalfW = 3, charHalfH = 5;
 var digitChar = new Array(MAX_DIGITS).fill(' ');
 var digitSource = [], digitScatter = [], digitDest = [], digitNextDest = [];
 var digitMorphing = new Array(MAX_DIGITS).fill(false);
@@ -312,7 +311,7 @@ function initThree() {
             '    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
             '    vDist = -mvPosition.z;',
             '    float pulse = 1.0 + uGlow * 0.3;',
-            '    gl_PointSize = aSize * pulse * (3684.0 / -mvPosition.z) * uPixelRatio;',
+            '    gl_PointSize = aSize * pulse * (9210.0 / -mvPosition.z) * uPixelRatio;',
             '    gl_Position = projectionMatrix * mvPosition;',
             '}'
         ].join('\n'),
@@ -338,7 +337,7 @@ function initThree() {
     scene.add(particleSystem);
 
     // === BACKGROUND DUST ===
-    var DUST_COUNT = 500;
+    var DUST_COUNT = 100;  // reduced from 500 (80% fewer ambient particles)
     var dustPos = new Float32Array(DUST_COUNT * 3);
     var dustCol = new Float32Array(DUST_COUNT * 3);
     var dustSiz = new Float32Array(DUST_COUNT);
@@ -385,7 +384,7 @@ function initThree() {
             '    float d = length(gl_PointCoord - vec2(0.5));',
             '    if (d > 0.5) discard;',
             '    float a = 1.0 - smoothstep(0.2, 0.5, d);',
-            '    gl_FragColor = vec4(vColor, a * 0.4);',
+            '    gl_FragColor = vec4(vColor, a * 0.12);',
             '}'
         ].join('\n'),
         transparent: true,
@@ -426,37 +425,44 @@ function initThree() {
 }
 
 /* === TEXT TO PARTICLE TARGETS === */
-function sampleTextToPoints(text) {
+/* Sample a single character (digit or comma) to numPoints target positions.
+   Returns normalized coordinates centered at (0,0), x/y in [-0.5, 0.5]. */
+function sampleDigitPoints(char, numPoints) {
+    var size = 80;
     var c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
     var ctx = c.getContext('2d');
-    var fontSize = 200;
-    c.width = Math.max(text.length * 130, 400);
-    c.height = 300;
-
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, c.width, c.height);
-    ctx.font = 'bold ' + fontSize + 'px "Space Mono", monospace';
-    ctx.fillStyle = '#fff';
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold ' + Math.floor(size * 0.85) + 'px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, c.width / 2, c.height / 2);
+    ctx.fillText(char, size / 2, size / 2);
 
-    var imgData = ctx.getImageData(0, 0, c.width, c.height);
-    var pts = [];
-    var step = 3;
-    for (var y = 0; y < c.height; y += step) {
-        for (var x = 0; x < c.width; x += step) {
-            var idx = (y * c.width + x) * 4;
-            if (imgData.data[idx] > 128) {
-                pts.push({
-                    x: (x - c.width / 2) * 0.035,
-                    y: (c.height / 2 - y) * 0.035,
-                    z: (Math.random() - 0.5) * 1.2
-                });
-            }
+    var data = ctx.getImageData(0, 0, size, size).data;
+    var filled = [];
+    for (var i = 0; i < size * size; i++) {
+        if (data[i * 4 + 3] > 128) {
+            filled.push({
+                x: (i % size) / size - 0.5,
+                y: 0.5 - Math.floor(i / size) / size,
+                z: 0
+            });
         }
     }
-    return pts;
+    if (filled.length === 0) {
+        var zero = { x: 0, y: 0, z: 0 };
+        var arr = [];
+        for (var j = 0; j < numPoints; j++) arr.push(zero);
+        return arr;
+    }
+    var out = [];
+    for (var k = 0; k < numPoints; k++) {
+        var src = filled[Math.floor(Math.random() * filled.length)];
+        out.push({ x: src.x, y: src.y, z: src.z });
+    }
+    return out;
 }
 
 function formatNumber(n) {
@@ -468,25 +474,20 @@ function canvasWidth() { return (renderer && renderer.domElement) ? renderer.dom
 function canvasHeight() { return (renderer && renderer.domElement) ? renderer.domElement.clientHeight || window.innerHeight : window.innerHeight; }
 
 function getCharPoints(ch) {
-    var pts = sampleTextToPoints(ch);
-    if (pts.length === 0) pts = [{ x: 0, y: 0, z: 0 }];
-    return pts;
+    return sampleDigitPoints(ch, DIGIT_CAPACITY);
 }
 
-/* Fit-to-viewport sizing: guarantees the full number is visible with margin
-   on all 4 sides at the current camera distance (Issue 2). Sizes to the ACTUAL
-   digit count so real 5-6 digit numbers render large & readable, not tiny. */
+/* Scale digit group so the full number fills 65% of canvas width.
+   Each sampled character lives in [-0.5, 0.5] x [-0.5, 0.5]; charScale converts
+   that unit square to world units. Spacing equals charScale so n characters
+   span exactly 65% of the visible viewport width. */
 function computeCharScales() {
     var cw = canvasWidth(), chh = canvasHeight();
-    var halfH = Math.tan((camera.fov * Math.PI / 180) / 2) * baseCamZ;
-    var halfW = halfH * (cw / chh);
-    var M = 0.82; // safety margin so nothing clips
-    var availH = halfH * M;
-    var availW = halfW * M;
+    var halfW = Math.tan((camera.fov * Math.PI / 180) / 2) * baseCamZ * (cw / chh);
     var n = Math.max(activeDigitCount, 1);
-    var spacing = Math.min(availW / (n * 0.62), 9.0);
-    var scale = Math.min((availH * 0.92) / (charHalfH * 2), (spacing * 0.92) / (charHalfW * 2));
-    return { spacing: spacing, scale: scale };
+    var totalWorldWidth = 2 * halfW * 0.65; // 65% of canvas width
+    var charScale = totalWorldWidth / n;    // width of one character in world units
+    return { spacing: charScale, scale: charScale };
 }
 
 function setNumberTargets(number) {
